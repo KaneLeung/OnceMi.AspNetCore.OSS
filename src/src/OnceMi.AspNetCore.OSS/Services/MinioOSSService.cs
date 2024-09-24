@@ -1,5 +1,7 @@
 ﻿using Minio;
 using Minio.DataModel;
+using Minio.DataModel.Args;
+using Minio.DataModel.Result;
 using Minio.Exceptions;
 using OnceMi.AspNetCore.OSS.Providers;
 using System;
@@ -27,7 +29,7 @@ namespace OnceMi.AspNetCore.OSS
         public MinioOSSService(ICacheProvider cache, OSSOptions options)
             : base(cache, options)
         {
-            MinioClient client = new MinioClient()
+            IMinioClient client = new MinioClient()
                 .WithEndpoint(options.Endpoint)
                 .WithRegion(options.Region)
                 .WithCredentials(options.AccessKey, options.SecretKey);
@@ -35,7 +37,7 @@ namespace OnceMi.AspNetCore.OSS
             {
                 client = client.WithSSL();
             }
-            this._client = client.Build();
+            this._client = (MinioClient)client.Build();
         }
 
         #region Minio自有方法
@@ -65,21 +67,21 @@ namespace OnceMi.AspNetCore.OSS
         /// </summary>
         /// <param name="bucketName">存储桶名称。</param>
         /// <returns></returns>
-        public Task<List<ItemUploadInfo>> ListIncompleteUploads(string bucketName)
+        public async Task<List<ItemUploadInfo>> ListIncompleteUploads(string bucketName)
         {
             if (string.IsNullOrEmpty(bucketName))
             {
                 throw new ArgumentNullException(nameof(bucketName));
             }
-            ListIncompleteUploadsArgs args = new ListIncompleteUploadsArgs()
-                .WithBucket(bucketName);
-            IObservable<Upload> observable = _client.ListIncompleteUploads(args);
-
             bool isFinish = false;
             List<ItemUploadInfo> result = new List<ItemUploadInfo>();
 
-            IDisposable subscription = observable.Subscribe(
-                item =>
+            try
+            {
+                ListIncompleteUploadsArgs args = new ListIncompleteUploadsArgs()
+                .WithBucket(bucketName);
+                var items = _client.ListIncompleteUploadsEnumAsync(args);
+                await foreach (var item in items)
                 {
                     result.Add(new ItemUploadInfo()
                     {
@@ -87,21 +89,20 @@ namespace OnceMi.AspNetCore.OSS
                         Initiated = item.Initiated,
                         UploadId = item.UploadId,
                     });
-                },
-                ex =>
-                {
-                    isFinish = true;
-                    throw new Exception(ex.Message, ex);
-                },
-                () =>
-                {
-                    isFinish = true;
-                });
+                }
+            }
+            catch (Exception ex)
+            {
+                isFinish = true;
+                throw new Exception(ex.Message, ex);
+            }
+            isFinish = true;
+
             while (!isFinish)
             {
                 Thread.Sleep(0);
             }
-            return Task.FromResult(result);
+            return result;
         }
 
         /// <summary>
@@ -646,22 +647,24 @@ namespace OnceMi.AspNetCore.OSS
             }
         }
 
-        public Task<List<Item>> ListObjectsAsync(string bucketName, string prefix = null)
+        public async Task<List<Item>> ListObjectsAsync(string bucketName, string prefix = null)
         {
             if (string.IsNullOrEmpty(bucketName))
             {
                 throw new ArgumentNullException(nameof(bucketName));
             }
-            IObservable<Minio.DataModel.Item> observable = _client.ListObjectsAsync(
+
+            List<Item> result = new List<Item>();
+            bool isFinish = false;
+            try
+            {
+                var items = _client.ListObjectsEnumAsync(
                 new ListObjectsArgs()
                     .WithBucket(bucketName)
                     .WithPrefix(prefix)
                     .WithRecursive(true));
-            List<Item> result = new List<Item>();
-            bool isFinish = false;
 
-            IDisposable subscription = observable.Subscribe(
-                item =>
+                await foreach (var item in items)
                 {
                     result.Add(new Item()
                     {
@@ -673,21 +676,20 @@ namespace OnceMi.AspNetCore.OSS
                         IsDir = item.IsDir,
                         LastModifiedDateTime = item.LastModifiedDateTime
                     });
-                },
-                ex =>
-                {
-                    isFinish = true;
-                },
-                () =>
-                {
-                    isFinish = true;
-                });
+                }
+            }
+            catch (Exception ex)
+            {
+                isFinish = true;
+                throw ex;
+            }
+            isFinish = true;
 
             while (!isFinish)
             {
                 Thread.Sleep(0);
             }
-            return Task.FromResult(result);
+            return result;
         }
 
         public async Task GetObjectAsync(string bucketName, string objectName, Action<Stream> callback, CancellationToken cancellationToken = default)
@@ -881,27 +883,25 @@ namespace OnceMi.AspNetCore.OSS
             {
                 delObjects.Add(FormatObjectName(item));
             }
-            RemoveObjectsArgs args = new RemoveObjectsArgs()
+            List<string> removeFailed = new List<string>();
+            bool isFinish = false;
+            try
+            {
+                RemoveObjectsArgs args = new RemoveObjectsArgs()
                 .WithBucket(bucketName)
                 .WithObjects(delObjects);
-            IObservable<Minio.Exceptions.DeleteError> observable = await _client.RemoveObjectsAsync(args);
-            List<string> removeFailed = new List<string>();
-
-            bool isFinish = false;
-            IDisposable subscription = observable.Subscribe(
-               err =>
-               {
-                   removeFailed.Add(err.Key);
-               },
-               ex =>
-               {
-                   isFinish = true;
-                   throw ex;
-               },
-               () =>
-               {
-                   isFinish = true;
-               });
+                IList<Minio.Exceptions.DeleteError> errorList = await _client.RemoveObjectsAsync(args);
+                foreach (var err in errorList)
+                {
+                    removeFailed.Add(err.Key);
+                }
+            }
+            catch (Exception ex)
+            {
+                isFinish = true;
+                throw ex;
+            }
+            isFinish = true;
             while (!isFinish)
             {
                 Thread.Sleep(0);
